@@ -41,6 +41,8 @@ use heapless::Vec;
 pub use smoltcp::config::DNS_MAX_SERVER_COUNT;
 #[cfg(feature = "multicast")]
 pub use smoltcp::iface::MulticastError;
+#[cfg(feature = "proto-ipv6")]
+pub use smoltcp::iface::RouteTableFull;
 #[cfg(any(feature = "dns", feature = "dhcpv4"))]
 use smoltcp::iface::SocketHandle;
 use smoltcp::iface::{Interface, SocketSet, SocketStorage};
@@ -670,6 +672,59 @@ impl<'d> Stack<'d> {
     /// Get whether the network stack has joined the given multicast group.
     pub fn has_multicast_group(&self, addr: impl Into<IpAddress>) -> bool {
         self.with(|i| i.iface.has_multicast_group(addr))
+    }
+}
+
+#[cfg(feature = "proto-ipv6")]
+impl<'d> Stack<'d> {
+    /// Enable or disable IPv6 forwarding, off by default.
+    ///
+    /// When enabled, a unicast IPv6 packet for another node goes out again if a route or an
+    /// on-link prefix reaches its destination, with its hop limit one lower; one that arrives
+    /// with a hop limit of 1 is dropped, with an ICMPv6 Time Exceeded back to its source.
+    /// Packets with a link-local source or destination are never forwarded.
+    pub fn set_ipv6_forwarding(&self, enabled: bool) {
+        self.with_mut(|i| i.iface.set_ipv6_forwarding(enabled))
+    }
+
+    /// Get whether IPv6 forwarding is enabled.
+    pub fn ipv6_forwarding(&self) -> bool {
+        self.with(|i| i.iface.ipv6_forwarding())
+    }
+
+    /// Add a route to `cidr` through the router `via`, replacing any route to the same prefix.
+    ///
+    /// The default route, from the static configuration's gateway, is kept apart: setting the
+    /// configuration replaces it but leaves the routes added here.
+    pub fn add_ipv6_route(&self, cidr: Ipv6Cidr, via: Ipv6Address) -> Result<(), RouteTableFull> {
+        self.with_mut(|i| {
+            let mut result = Ok(());
+            i.iface.routes_mut().update(|routes| {
+                routes.retain(|r| r.cidr != IpCidr::Ipv6(cidr));
+                result = routes
+                    .push(smoltcp::iface::Route {
+                        cidr: IpCidr::Ipv6(cidr),
+                        via_router: IpAddress::Ipv6(via),
+                        preferred_until: None,
+                        expires_at: None,
+                    })
+                    .map_err(|_| RouteTableFull);
+            });
+            result
+        })
+    }
+
+    /// Remove the route to `cidr`, returning whether there was one.
+    pub fn remove_ipv6_route(&self, cidr: Ipv6Cidr) -> bool {
+        self.with_mut(|i| {
+            let mut removed = false;
+            i.iface.routes_mut().update(|routes| {
+                let before = routes.len();
+                routes.retain(|r| r.cidr != IpCidr::Ipv6(cidr));
+                removed = routes.len() != before;
+            });
+            removed
+        })
     }
 }
 
