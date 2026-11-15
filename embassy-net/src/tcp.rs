@@ -373,6 +373,21 @@ impl<'a> TcpSocket<'a> {
         self.io.with_mut(|s, _| s.set_hop_limit(hop_limit))
     }
 
+    /// Return the DSCP of sent IPv6 packets.
+    pub fn dscp(&self) -> u8 {
+        self.io.with(|s, _| s.dscp())
+    }
+
+    /// Set the DSCP of sent IPv6 packets, in the upper six bits of their Traffic Class.
+    /// 0, default forwarding, unless set.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `dscp` is above 63.
+    pub fn set_dscp(&mut self, dscp: u8) {
+        self.io.with_mut(|s, _| s.set_dscp(dscp))
+    }
+
     /// Enable or disable Nagles's algorithm.
     ///
     /// By default, Nagle's algorithm is enabled.

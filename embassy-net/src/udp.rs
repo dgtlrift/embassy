@@ -390,6 +390,32 @@ impl<'a> UdpSocket<'a> {
     pub fn set_hop_limit(&mut self, hop_limit: Option<u8>) {
         self.with_mut(|s, _| s.set_hop_limit(hop_limit))
     }
+
+    /// Return the DSCP of sent IPv6 packets.
+    pub fn dscp(&self) -> u8 {
+        self.with(|s, _| s.dscp())
+    }
+
+    /// Set the DSCP of sent IPv6 packets, in the upper six bits of their Traffic Class.
+    /// 0, default forwarding, unless set.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `dscp` is above 63.
+    pub fn set_dscp(&mut self, dscp: u8) {
+        self.with_mut(|s, _| s.set_dscp(dscp))
+    }
+
+    /// Return whether sent IPv6 packets are ECN-capable.
+    pub fn ecn_capable(&self) -> bool {
+        self.with(|s, _| s.ecn_capable())
+    }
+
+    /// Set whether sent IPv6 packets are ECN-capable, sent with ECT(0) so that a congested
+    /// router can mark them CE instead of dropping them. Off unless set.
+    pub fn set_ecn_capable(&mut self, ecn_capable: bool) {
+        self.with_mut(|s, _| s.set_ecn_capable(ecn_capable))
+    }
 }
 
 impl Drop for UdpSocket<'_> {
