@@ -388,6 +388,23 @@ impl<'a> TcpSocket<'a> {
         self.io.with_mut(|s, _| s.set_dscp(dscp))
     }
 
+    /// Cap the segment size: the MSS this socket advertises, and the largest segment it
+    /// sends. `None`, the default, leaves it to the interface's MTU. Over 6LoWPAN, a cap that
+    /// fits one frame keeps segments from being fragmented. Applies from the next `connect`
+    /// or `accept`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a size of 0 is given.
+    pub fn set_max_segment_size(&mut self, max_seg_size: Option<u16>) {
+        self.io.with_mut(|s, _| s.set_max_segment_size(max_seg_size))
+    }
+
+    /// Return the cap on the segment size, if one is set.
+    pub fn max_segment_size(&self) -> Option<u16> {
+        self.io.with(|s, _| s.max_segment_size())
+    }
+
     /// Enable or disable Explicit Congestion Notification (RFC 3168), off by default.
     ///
     /// When enabled, the socket asks for ECN when it connects and accepts it when it accepts
