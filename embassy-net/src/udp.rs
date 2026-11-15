@@ -416,6 +416,12 @@ impl<'a> UdpSocket<'a> {
     pub fn set_ecn_capable(&mut self, ecn_capable: bool) {
         self.with_mut(|s, _| s.set_ecn_capable(ecn_capable))
     }
+
+    /// Return how many datagrams arrived marked CE (Congestion Experienced). Each one's
+    /// [`UdpMetadata::ecn`] reports its own ECN field.
+    pub fn ce_received(&self) -> u32 {
+        self.with(|s, _| s.ce_received())
+    }
 }
 
 impl Drop for UdpSocket<'_> {

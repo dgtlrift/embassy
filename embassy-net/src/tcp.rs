@@ -388,6 +388,38 @@ impl<'a> TcpSocket<'a> {
         self.io.with_mut(|s, _| s.set_dscp(dscp))
     }
 
+    /// Enable or disable Explicit Congestion Notification (RFC 3168), off by default.
+    ///
+    /// When enabled, the socket asks for ECN when it connects and accepts it when it accepts
+    /// a connection, if smoltcp has congestion control. On a connection that negotiated it,
+    /// a congested router's CE mark slows the sender down instead of a dropped segment. Applies
+    /// from the next `connect` or `accept`.
+    pub fn set_ecn_enabled(&mut self, enabled: bool) {
+        self.io.with_mut(|s, _| s.set_ecn_enabled(enabled))
+    }
+
+    /// Return whether ECN is enabled.
+    pub fn ecn_enabled(&self) -> bool {
+        self.io.with(|s, _| s.ecn_enabled())
+    }
+
+    /// Return whether the current connection negotiated ECN.
+    pub fn ecn_active(&self) -> bool {
+        self.io.with(|s, _| s.ecn_active())
+    }
+
+    /// Return how many segments arrived marked CE (Congestion Experienced), since the last
+    /// `connect` or `accept`.
+    pub fn ce_received(&self) -> u32 {
+        self.io.with(|s, _| s.ce_received())
+    }
+
+    /// Return how many times the peer's ECN-Echo reduced the congestion window, since the last
+    /// `connect` or `accept`.
+    pub fn ece_received(&self) -> u32 {
+        self.io.with(|s, _| s.ece_received())
+    }
+
     /// Enable or disable Nagles's algorithm.
     ///
     /// By default, Nagle's algorithm is enabled.

@@ -692,6 +692,15 @@ impl<'d> Stack<'d> {
         self.with(|i| i.iface.ipv6_forwarding())
     }
 
+    /// Limit the ICMPv6 error messages the stack sends: at most `burst` at once, then one each
+    /// `interval`. The default is 10, and one each 100 ms.
+    pub fn set_icmpv6_error_limit(&self, burst: u32, interval: embassy_time::Duration) {
+        self.with_mut(|i| {
+            i.iface
+                .set_icmpv6_error_limit(burst, crate::time::duration_to_smoltcp(interval))
+        })
+    }
+
     /// Add a route to `cidr` through the router `via`, replacing any route to the same prefix.
     ///
     /// The default route, from the static configuration's gateway, is kept apart: setting the
