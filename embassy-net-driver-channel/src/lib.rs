@@ -10,7 +10,7 @@ use core::mem::MaybeUninit;
 use core::task::{Context, Poll};
 
 pub use embassy_net_driver as driver;
-use embassy_net_driver::{Capabilities, LinkState};
+use embassy_net_driver::{Capabilities, LinkState, LocalLoss, LossTag};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::waitqueue::WakerRegistration;
@@ -46,6 +46,54 @@ struct Shared {
     link_state: LinkState,
     waker: WakerRegistration,
     hardware_address: driver::HardwareAddress,
+    losses: Losses,
+    loss_waker: WakerRegistration,
+}
+
+/// How many local-loss reports wait for the stack; when full, the oldest goes.
+const LOSSES: usize = 4;
+
+/// The local-loss reports waiting for the stack, oldest first.
+struct Losses {
+    reports: [Option<LocalLoss>; LOSSES],
+    next: usize,
+    len: usize,
+}
+
+impl Losses {
+    const fn new() -> Self {
+        Self {
+            reports: [None; LOSSES],
+            next: 0,
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, loss: LocalLoss) {
+        if self.len == LOSSES {
+            self.next = (self.next + 1) % LOSSES;
+            self.len -= 1;
+        }
+        self.reports[(self.next + self.len) % LOSSES] = Some(loss);
+        self.len += 1;
+    }
+
+    fn pop(&mut self) -> Option<LocalLoss> {
+        if self.len == 0 {
+            return None;
+        }
+        let loss = self.reports[self.next].take();
+        self.next = (self.next + 1) % LOSSES;
+        self.len -= 1;
+        loss
+    }
+}
+
+impl Shared {
+    fn report_local_loss(&mut self, loss: LocalLoss) {
+        self.losses.push(loss);
+        self.loss_waker.wake();
+    }
 }
 
 /// Channel runner.
@@ -172,9 +220,21 @@ impl<'d, const MTU: usize> Runner<'d, MTU> {
         }
     }
 
+    /// Wait for an outbound packet, and return it with its local-loss tag, if the stack gave
+    /// it one.
+    pub async fn tx_buf_with_tag(&mut self) -> (&mut [u8], Option<LossTag>) {
+        let p = self.tx_chan.receive().await;
+        (&mut p.buf[..p.len], p.tag)
+    }
+
     /// Mark outbound packet as copied.
     pub fn tx_done(&mut self) {
         self.tx_chan.receive_done();
+    }
+
+    /// Report a tagged packet lost before it left the link layer.
+    pub fn report_local_loss(&mut self, loss: LocalLoss) {
+        self.shared.lock(|s| s.borrow_mut().report_local_loss(loss));
     }
 }
 
@@ -195,6 +255,11 @@ impl<'d> StateRunner<'d> {
             s.hardware_address = address;
             s.waker.wake();
         });
+    }
+
+    /// Report a tagged packet lost before it left the link layer.
+    pub fn report_local_loss(&self, loss: LocalLoss) {
+        self.shared.lock(|s| s.borrow_mut().report_local_loss(loss));
     }
 }
 
@@ -248,6 +313,13 @@ impl<'d, const MTU: usize> TxRunner<'d, MTU> {
         }
     }
 
+    /// Wait for an outbound packet, and return it with its local-loss tag, if the stack gave
+    /// it one.
+    pub async fn tx_buf_with_tag(&mut self) -> (&mut [u8], Option<LossTag>) {
+        let p = self.tx_chan.receive().await;
+        (&mut p.buf[..p.len], p.tag)
+    }
+
     /// Mark outbound packet as copied.
     pub fn tx_done(&mut self) {
         self.tx_chan.receive_done();
@@ -279,6 +351,8 @@ pub fn new<'d, const MTU: usize, const N_RX: usize, const N_TX: usize>(
             link_state: LinkState::Down,
             hardware_address,
             waker: WakerRegistration::new(),
+            losses: Losses::new(),
+            loss_waker: WakerRegistration::new(),
         })),
     });
 
@@ -303,13 +377,18 @@ pub fn new<'d, const MTU: usize, const N_RX: usize, const N_TX: usize>(
 /// Represents a packet of size MTU.
 pub struct PacketBuf<const MTU: usize> {
     len: usize,
+    tag: Option<LossTag>,
     buf: [u8; MTU],
 }
 
 impl<const MTU: usize> PacketBuf<MTU> {
     /// Create a new packet buffer.
     pub const fn new() -> Self {
-        Self { len: 0, buf: [0; MTU] }
+        Self {
+            len: 0,
+            tag: None,
+            buf: [0; MTU],
+        }
     }
 }
 
@@ -335,7 +414,13 @@ impl<'d, const MTU: usize> embassy_net_driver::Driver for Device<'d, MTU> {
 
     fn receive(&mut self, cx: &mut Context) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         if self.rx.poll_receive(cx).is_ready() && self.tx.poll_send(cx).is_ready() {
-            Some((RxToken { rx: self.rx.borrow() }, TxToken { tx: self.tx.borrow() }))
+            Some((
+                RxToken { rx: self.rx.borrow() },
+                TxToken {
+                    tx: self.tx.borrow(),
+                    tag: None,
+                },
+            ))
         } else {
             None
         }
@@ -344,7 +429,10 @@ impl<'d, const MTU: usize> embassy_net_driver::Driver for Device<'d, MTU> {
     /// Construct a transmit token.
     fn transmit(&mut self, cx: &mut Context) -> Option<Self::TxToken<'_>> {
         if self.tx.poll_send(cx).is_ready() {
-            Some(TxToken { tx: self.tx.borrow() })
+            Some(TxToken {
+                tx: self.tx.borrow(),
+                tag: None,
+            })
         } else {
             None
         }
@@ -364,6 +452,17 @@ impl<'d, const MTU: usize> embassy_net_driver::Driver for Device<'d, MTU> {
             let s = &mut *s.borrow_mut();
             s.waker.register(cx.waker());
             s.link_state
+        })
+    }
+
+    fn poll_local_loss(&mut self, cx: &mut Context) -> Option<LocalLoss> {
+        self.shared.lock(|s| {
+            let s = &mut *s.borrow_mut();
+            let loss = s.losses.pop();
+            if loss.is_none() {
+                s.loss_waker.register(cx.waker());
+            }
+            loss
         })
     }
 }
@@ -393,6 +492,7 @@ impl<'a, const MTU: usize> embassy_net_driver::RxToken for RxToken<'a, MTU> {
 /// Holds outbound transmit channel and interfaces with embassy-net-driver.
 pub struct TxToken<'a, const MTU: usize> {
     tx: zerocopy_channel::Sender<'a, NoopRawMutex, PacketBuf<MTU>>,
+    tag: Option<LossTag>,
 }
 
 impl<'a, const MTU: usize> embassy_net_driver::TxToken for TxToken<'a, MTU> {
@@ -404,7 +504,66 @@ impl<'a, const MTU: usize> embassy_net_driver::TxToken for TxToken<'a, MTU> {
         let pkt = unwrap!(self.tx.try_send());
         let r = f(&mut pkt.buf[..len]);
         pkt.len = len;
+        pkt.tag = self.tag;
         self.tx.send_done();
         r
+    }
+
+    fn set_tag(&mut self, tag: LossTag) {
+        self.tag = Some(tag);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::task::Waker;
+
+    use embassy_net_driver::{Driver, LossReason, TxToken as _};
+
+    use super::*;
+
+    fn loss(id: u32) -> LocalLoss {
+        LocalLoss {
+            tag: LossTag { transport: 6, id },
+            reason: LossReason::NoAck,
+        }
+    }
+
+    #[test]
+    fn a_tag_goes_down_with_its_packet_and_a_report_comes_back() {
+        let mut state = State::<16, 1, 2>::new();
+        let (mut runner, mut device) = new(&mut state, driver::HardwareAddress::Ip);
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut tx = device.transmit(&mut cx).unwrap();
+        tx.set_tag(LossTag { transport: 6, id: 7 });
+        tx.consume(3, |b| b.copy_from_slice(&[1, 2, 3]));
+        device.transmit(&mut cx).unwrap().consume(1, |b| b[0] = 9);
+
+        let p = runner.tx_chan.try_receive().unwrap();
+        assert_eq!(
+            (&p.buf[..p.len], p.tag),
+            (&[1, 2, 3][..], Some(LossTag { transport: 6, id: 7 }))
+        );
+        runner.tx_done();
+        let p = runner.tx_chan.try_receive().unwrap();
+        assert_eq!(p.tag, None);
+        runner.tx_done();
+
+        assert_eq!(device.poll_local_loss(&mut cx), None);
+        runner.report_local_loss(loss(7));
+        assert_eq!(device.poll_local_loss(&mut cx), Some(loss(7)));
+        assert_eq!(device.poll_local_loss(&mut cx), None);
+    }
+
+    #[test]
+    fn a_full_report_queue_drops_its_oldest() {
+        let mut losses = Losses::new();
+        for id in 0..6 {
+            losses.push(loss(id));
+        }
+        for id in 2..6 {
+            assert_eq!(losses.pop(), Some(loss(id)));
+        }
+        assert_eq!(losses.pop(), None);
     }
 }

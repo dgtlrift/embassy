@@ -80,13 +80,25 @@ pub trait Driver {
     /// what kind of packet the sent/received bytes are, and determines some behaviors of
     /// the interface. For example, ARP/NDISC address resolution is only done for Ethernet mediums.
     fn hardware_address(&self) -> HardwareAddress;
+
+    /// Get the next report of a packet this device lost before it left the link layer.
+    ///
+    /// Only packets given a tag with [`TxToken::set_tag`] are reported. If there is a report,
+    /// this function returns `Some`; if there isn't, it returns `None`, and wakes `cx.waker()`
+    /// when one is ready. The default reports nothing, for drivers that can't tell.
+    fn poll_local_loss(&mut self, cx: &mut Context) -> Option<LocalLoss> {
+        let _ = cx;
+        None
+    }
 }
 
 impl<T: ?Sized + Driver> Driver for &mut T {
-    type RxToken<'a> = T::RxToken<'a>
+    type RxToken<'a>
+        = T::RxToken<'a>
     where
         Self: 'a;
-    type TxToken<'a> = T::TxToken<'a>
+    type TxToken<'a>
+        = T::TxToken<'a>
     where
         Self: 'a;
 
@@ -104,6 +116,9 @@ impl<T: ?Sized + Driver> Driver for &mut T {
     }
     fn hardware_address(&self) -> HardwareAddress {
         T::hardware_address(self)
+    }
+    fn poll_local_loss(&mut self, cx: &mut Context) -> Option<LocalLoss> {
+        T::poll_local_loss(self, cx)
     }
 }
 
@@ -129,6 +144,52 @@ pub trait TxToken {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R;
+
+    /// Tags the packet, so that the driver reports it if it's lost locally
+    /// ([`Driver::poll_local_loss`]). Call it before [`TxToken::consume`]. The default ignores
+    /// the tag, for drivers that don't report losses.
+    fn set_tag(&mut self, tag: LossTag) {
+        let _ = tag;
+    }
+}
+
+/// A packet's tag for local-loss reports: its transport and an ID. The stack sets both, and
+/// the driver hands them back unread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct LossTag {
+    /// The packet's transport, as its IP protocol number: 6 for TCP, 17 for UDP.
+    pub transport: u8,
+    /// The packet's ID within its transport.
+    pub id: u32,
+}
+
+/// Why a packet was lost before it left the link layer.
+///
+/// The reasons follow the link layer's own reports, such as IEEE 802.15.4's MCPS-DATA.confirm
+/// statuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum LossReason {
+    /// The link layer had no room for the packet.
+    Refused,
+    /// The link layer queued the packet, then dropped it for one of a higher class.
+    Dropped,
+    /// No acknowledgment came after every retry.
+    NoAck,
+    /// The channel was busy at every attempt.
+    ChannelBusy,
+}
+
+/// A report of a packet lost before it left the link layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct LocalLoss {
+    /// The packet's tag.
+    pub tag: LossTag,
+    /// Why it was lost.
+    pub reason: LossReason,
 }
 
 /// A description of device capabilities.
