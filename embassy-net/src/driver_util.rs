@@ -73,6 +73,22 @@ where
 
         smolcaps
     }
+
+    #[cfg(feature = "local-loss")]
+    fn local_loss(&mut self) -> Option<phy::LocalLoss> {
+        let loss = self.inner.poll_local_loss(self.cx.as_deref_mut()?)?;
+        Some(phy::LocalLoss {
+            transport: loss.tag.transport.into(),
+            id: loss.tag.id,
+            reason: match loss.reason {
+                embassy_net_driver::LossReason::Refused => phy::LossReason::Refused,
+                embassy_net_driver::LossReason::NoAck => phy::LossReason::NoAck,
+                embassy_net_driver::LossReason::ChannelBusy => phy::LossReason::ChannelBusy,
+                // Dropped, and any reason added later: the packet was queued, then lost.
+                _ => phy::LossReason::Dropped,
+            },
+        })
+    }
 }
 
 pub(crate) struct RxTokenAdapter<T>(T)
@@ -113,5 +129,15 @@ where
             trace!("embassy device tx: {:02x}", buf);
             r
         })
+    }
+
+    #[cfg(feature = "local-loss")]
+    fn set_meta(&mut self, meta: phy::PacketMeta) {
+        if let Some(transport) = meta.transport {
+            self.0.set_tag(embassy_net_driver::LossTag {
+                transport: transport.into(),
+                id: meta.id,
+            });
+        }
     }
 }
